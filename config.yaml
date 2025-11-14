@@ -1,0 +1,14 @@
+batch_size: 64
+num_epochs: 30
+lr: 3e-4
+seq_len: 350
+d_model: 512
+lang_src: "en"
+lang_tgt: "fr"
+model_folder: "weights"
+model_basename: "tmodel_"
+preload: null
+tokenizer_file: "tokenizer_{0}.json"
+experiment_name: "runs/tmodel"
+save_every: 1
+warmup_steps: 4000
