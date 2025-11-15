@@ -2,17 +2,24 @@
 set -euo pipefail
 
 echo ">>> Preparing environment"
-sudo apt-get update -y
 
-echo ">>> Installing Python dependencies (CUDA build)"
-python3 -m pip install --upgrade pip
-python3 -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-python3 -m pip install datasets tokenizers sentencepiece accelerate wandb matplotlib tensorboard pyyaml
+# Check if venv exists, if not create it
+if [ ! -d "venv" ]; then
+    echo ">>> Virtual environment not found. Running setup..."
+    bash setup_venv.sh
+fi
 
+echo ">>> Activating virtual environment..."
+source venv/bin/activate
+
+# Set environment variables
 export HF_HOME="${HF_HOME:-/workspace/cache/hf}"
 export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${HF_HOME}/datasets}"
 export TOKENIZERS_PARALLELISM=false
 mkdir -p "${HF_DATASETS_CACHE}"
 
+# Set PyTorch CUDA memory allocation config
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 echo ">>> Starting training"
-python3 train.py --config config.yaml
+python train.py --config config.yaml

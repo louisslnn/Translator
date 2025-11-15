@@ -1,0 +1,31 @@
+batch_size: 16  # Reduced from 64 to save memory
+num_epochs: 30
+lr: 3e-4
+seq_len: 350
+d_model: 512
+lang_src: "en"
+lang_tgt: "fr"
+model_folder: "weights"
+model_basename: "tmodel_"
+preload: null
+tokenizer_file: "tokenizer_{0}.json"
+experiment_name: "runs/tmodel"
+save_every: 1
+warmup_steps: 4000
+validate_every_steps: 500
+validation_examples: 2
+grad_accumulation_steps: 4  # Increased to maintain effective batch size (16 * 4 = 64)
+mixed_precision: "bf16"
+device: "cuda"
+allow_tf32: true
+enable_compile: false
+compile_fullgraph: false
+num_workers: 2  # Reduced to save memory
+pin_memory: true
+persistent_workers: false  # Disabled to save memory
+prefetch_factor: 1  # Reduced to save memory
+drop_last: true
+seed: 42
+dataset_cache_dir: null
+log_every_steps: 50
+

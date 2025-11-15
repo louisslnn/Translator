@@ -197,7 +197,8 @@ def get_ds(config, pin_memory: bool, seed: Optional[int] = None):
 
 
 def get_model(config, vocab_src_len, vocab_tgt_len):
-    model = build_transformer(vocab_src_len, vocab_tgt_len, config['seq_len'], config['seq_len'], config['d_model'])
+    use_checkpoint = config.get('use_gradient_checkpointing', True)
+    model = build_transformer(vocab_src_len, vocab_tgt_len, config['seq_len'], config['seq_len'], config['d_model'], use_checkpoint=use_checkpoint)
     return model
 
 
@@ -247,11 +248,20 @@ def get_autocast_dtype(precision: str) -> torch.dtype:
 def train_model(config):
     device = resolve_device(config.get("device"))
     print(f"Using device {device}.")
+    
+    # Set PyTorch CUDA memory allocation config to reduce fragmentation
+    if device.type == "cuda":
+        import os
+        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+        # Clear any existing cache
+        torch.cuda.empty_cache()
 
     set_seed(int(config.get("seed", 42)))
 
     if device.type == "cuda":
-        torch.cuda.set_device(device)
+        # Extract device index if specified, otherwise use 0
+        device_index = device.index if device.index is not None else 0
+        torch.cuda.set_device(device_index)
         if config.get("allow_tf32", True):
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
@@ -271,7 +281,9 @@ def train_model(config):
     model = maybe_compile_model(model, config)
 
     writer = SummaryWriter(config['experiment_name'])
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config['lr'], eps=1e-9)
+    # Ensure lr is a float (safety check)
+    lr = float(config['lr']) if not isinstance(config['lr'], (int, float)) else float(config['lr'])
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, eps=1e-9)
 
     initial_epoch = 0
     global_step = 0
@@ -291,7 +303,8 @@ def train_model(config):
     validate_every_steps = int(config.get('validate_every_steps', 500))
     validation_examples = int(config.get('validation_examples', 2))
 
-    precision = config.get("mixed_precision", "none")
+    # Ensure mixed_precision is a string (safety check)
+    precision = str(config.get("mixed_precision", "none")).lower()
     autocast_dtype = get_autocast_dtype(precision)
     use_autocast = device.type == "cuda" and autocast_dtype != torch.float32
     scaler = GradScaler(enabled=use_autocast and autocast_dtype == torch.float16)
@@ -304,6 +317,11 @@ def train_model(config):
 
         running_loss = 0.0
         optimizer.zero_grad(set_to_none=True)
+        
+        # Clear CUDA cache at the start of each epoch
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+        
         for step_idx, batch in enumerate(batch_iterator, start=1):
             encoder_input = batch['encoder_input'].to(device)  # (batch, seq_len)
             decoder_input = batch['decoder_input'].to(device)  # (batch, seq_len)
@@ -317,12 +335,15 @@ def train_model(config):
                 decoder_input = decoder_input.unsqueeze(0)
 
             # IMPORTANT: label key is 'labels' (not 'label')
-            label = batch.get('labels') or batch.get('label')
-            if label is None:
+            if 'labels' in batch:
+                label = batch['labels']
+            elif 'label' in batch:
+                label = batch['label']
+            else:
                 raise KeyError("Batch must contain 'labels' (target tokens). Check BilingualDataset.")
             label = label.to(device)
 
-            autocast_context = autocast(device_type=device.type, dtype=autocast_dtype) if use_autocast else nullcontext()
+            autocast_context = autocast(dtype=autocast_dtype) if use_autocast else nullcontext()
 
             with autocast_context:
                 encoder_output = model.encode(encoder_input, encoder_mask)
@@ -330,13 +351,22 @@ def train_model(config):
                 proj_output = model.project(decoder_output)
                 loss = loss_fn(proj_output.view(-1, proj_output.size(-1)), label.view(-1))
                 loss_for_backprop = loss / grad_accum_steps
+                
+                # Store loss value before deleting tensors
+                loss_value = loss.item()
+                
+                # Explicitly delete intermediate tensors to free memory
+                del encoder_output, decoder_output, proj_output
 
-            running_loss += loss.item()
+            running_loss += loss_value
 
             if scaler.is_enabled():
                 scaler.scale(loss_for_backprop).backward()
             else:
                 loss_for_backprop.backward()
+            
+            # Delete loss tensors after backward pass (they're no longer needed)
+            del loss, loss_for_backprop
 
             if step_idx % grad_accum_steps == 0:
                 if scaler.is_enabled():
@@ -350,7 +380,13 @@ def train_model(config):
                 optimizer.zero_grad(set_to_none=True)
                 global_step += 1
 
-                writer.add_scalar('train/loss', loss.item(), global_step)
+                writer.add_scalar('train/loss', loss_value, global_step)
+                
+                # Periodically clear CUDA cache to prevent fragmentation
+                if device.type == "cuda":
+                    if step_idx % 50 == 0:
+                        torch.cuda.synchronize()
+                        torch.cuda.empty_cache()
 
                 # occasional validation
                 if global_step % validate_every_steps == 0:
@@ -369,7 +405,7 @@ def train_model(config):
 
             if step_idx % int(config.get("log_every_steps", 50)) == 0:
                 avg_loss = running_loss / step_idx
-                batch_iterator.set_postfix({"loss": f"{loss.item():.4f}", "avg_loss": f"{avg_loss:.4f}"})
+                batch_iterator.set_postfix({"loss": f"{loss_value:.4f}", "avg_loss": f"{avg_loss:.4f}"})
 
         # epoch end validation
         run_validation(model, val_dataloader, tokenizer_src, tokenizer_tgt, config['seq_len'], device,

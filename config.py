@@ -59,6 +59,42 @@ def _merge_configs(base: Dict[str, Any], override: Optional[Dict[str, Any]]) -> 
     return base
 
 
+def _normalize_config_types(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize config values to ensure correct types."""
+    # Numeric fields that should be floats
+    float_fields = ["lr"]
+    for key in float_fields:
+        if key in config and config[key] is not None:
+            if isinstance(config[key], str):
+                config[key] = float(config[key])
+            elif not isinstance(config[key], (int, float)):
+                config[key] = float(config[key])
+    
+    # Integer fields
+    int_fields = [
+        "batch_size", "num_epochs", "seq_len", "d_model", "save_every",
+        "validate_every_steps", "validation_examples", "warmup_steps",
+        "grad_accumulation_steps", "num_workers", "prefetch_factor", "seed",
+        "log_every_steps"
+    ]
+    for key in int_fields:
+        if key in config and config[key] is not None:
+            if isinstance(config[key], str):
+                config[key] = int(config[key])
+            elif isinstance(config[key], float):
+                config[key] = int(config[key])
+    
+    # Boolean fields
+    bool_fields = ["allow_tf32", "enable_compile", "compile_fullgraph", 
+                    "pin_memory", "persistent_workers", "drop_last"]
+    for key in bool_fields:
+        if key in config and config[key] is not None:
+            if isinstance(config[key], str):
+                config[key] = config[key].lower() in ("true", "1", "yes", "on")
+    
+    return config
+
+
 def get_config(config_path: Optional[str] = None, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Load configuration values respecting (in order of precedence):
@@ -77,6 +113,9 @@ def get_config(config_path: Optional[str] = None, overrides: Optional[Dict[str, 
 
     if overrides:
         config = _merge_configs(config, overrides)
+
+    # Normalize types to ensure correct data types
+    config = _normalize_config_types(config)
 
     # Ensure folders exist and are strings
     config["model_folder"] = str(Path(config["model_folder"]))

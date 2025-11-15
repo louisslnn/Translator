@@ -74,7 +74,7 @@ class BilingualDataset(Dataset):
             "decoder_input": decoder_input, # (seq_len)
             "encoder_mask": encoder_mask.bool(), # (1, 1, seq_len)
             "decoder_mask": decoder_mask.bool() & causal_mask(decoder_input.size(0)), # (1, seq_len) & (seq_len, seq_len)
-            "label": label, # (seq_len)
+            "labels": label, # (seq_len)
             "src_text": src_text,
             "tgt_text": tgt_text
         }

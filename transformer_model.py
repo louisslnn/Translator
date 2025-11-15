@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import math
+from torch.utils.checkpoint import checkpoint
 
 class InputEmbeddings(nn.Module):
     def __init__(self, d_model: int, vocab_size: int):
@@ -98,9 +99,11 @@ class MultiHeadAttentionBlock(nn.Module):
         key = key.view(key.shape[0], key.shape[1], self.h, self.d_k).transpose(1, 2)
         value = value.view(value.shape[0], value.shape[1], self.h, self.d_k).transpose(1, 2)
 
-        # Compute attention and store scores
+        # Compute attention (don't store scores during training to save memory)
         x, attn_scores = MultiHeadAttentionBlock.attention(query, key, value, mask, self.dropout)
-        self.attention_scores = attn_scores.detach().cpu()  # safe for visualization
+        # Only store attention scores if we're in eval mode (for visualization)
+        if not self.training:
+            self.attention_scores = attn_scores.detach().cpu()  # safe for visualization
 
         # Merge heads
         x = x.transpose(1, 2).contiguous().view(x.shape[0], -1, self.h * self.d_k)
@@ -129,14 +132,18 @@ class EncoderBlock(nn.Module):
         return x
 
 class Encoder(nn.Module):
-    def __init__(self, layers: nn.ModuleList):
+    def __init__(self, layers: nn.ModuleList, use_checkpoint: bool = False):
         super().__init__()
         self.layers = layers
         self.norm = LayerNormalization()
+        self.use_checkpoint = use_checkpoint
     
     def forward(self, x, mask):
         for layer in self.layers:
-            x = layer(x, mask)
+            if self.use_checkpoint and self.training:
+                x = checkpoint(layer, x, mask, use_reentrant=False)
+            else:
+                x = layer(x, mask)
         return self.norm(x)
 
 class DecoderBlock(nn.Module):
@@ -155,14 +162,18 @@ class DecoderBlock(nn.Module):
         return x
 
 class Decoder(nn.Module):
-    def __init__(self, layers: nn.ModuleList):
+    def __init__(self, layers: nn.ModuleList, use_checkpoint: bool = False):
         super().__init__()
         self.layers = layers
         self.norm = LayerNormalization()
+        self.use_checkpoint = use_checkpoint
     
     def forward(self, x, encoder_output, src_mask, tgt_mask):
         for layer in self.layers:
-            x = layer(x, encoder_output, src_mask, tgt_mask)
+            if self.use_checkpoint and self.training:
+                x = checkpoint(layer, x, encoder_output, src_mask, tgt_mask, use_reentrant=False)
+            else:
+                x = layer(x, encoder_output, src_mask, tgt_mask)
         return self.norm(x)
     
 class ProjectionLayer(nn.Module):
@@ -200,7 +211,7 @@ class Transformer(nn.Module):
         return self.projection_layer(x)
     
 def build_transformer(src_vocab_size : int, tgt_vocab_size : int, src_seq_len : int, tgt_seq_len : int, d_model : int = 512,
-                      N : int = 6, h : int = 8, dropout :float = 0.1, d_ff : int = 2048):
+                      N : int = 6, h : int = 8, dropout :float = 0.1, d_ff : int = 2048, use_checkpoint: bool = True):
     # Create the embeddings layers
     src_embed = InputEmbeddings(d_model, src_vocab_size)
     tgt_embed = InputEmbeddings(d_model, tgt_vocab_size)
@@ -226,9 +237,9 @@ def build_transformer(src_vocab_size : int, tgt_vocab_size : int, src_seq_len : 
         decoder_block = DecoderBlock(decoder_self_attention_block, decoder_cross_attention_block, feed_forward_block, dropout)
         decoder_blocks.append(decoder_block)
     
-    # Create the encoder and the decoder
-    encoder = Encoder(nn.ModuleList(encoder_blocks))
-    decoder = Decoder(nn.ModuleList(decoder_blocks))
+    # Create the encoder and the decoder with gradient checkpointing
+    encoder = Encoder(nn.ModuleList(encoder_blocks), use_checkpoint=use_checkpoint)
+    decoder = Decoder(nn.ModuleList(decoder_blocks), use_checkpoint=use_checkpoint)
 
     # Create the projection layer
     projection_layer = ProjectionLayer(d_model, tgt_vocab_size)

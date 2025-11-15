@@ -1,0 +1,13 @@
+# PyTorch is installed separately with CUDA support
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+datasets
+tokenizers
+sentencepiece
+accelerate
+wandb
+matplotlib
+tensorboard
+pyyaml
+tqdm
+numpy
