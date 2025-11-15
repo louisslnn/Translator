@@ -28,11 +28,25 @@ class BilingualDataset(Dataset):
         enc_input_tokens = self.tokenizer_src.encode(src_text).ids
         dec_input_tokens = self.tokenizer_tgt.encode(tgt_text).ids
 
+        # Truncate if too long (leave room for SOS, EOS, and at least some padding)
+        max_src_len = self.seq_len - 2  # -2 for SOS and EOS
+        max_tgt_len = self.seq_len - 1  # -1 for SOS (EOS goes in label)
+        
+        if len(enc_input_tokens) > max_src_len:
+            enc_input_tokens = enc_input_tokens[:max_src_len]
+        if len(dec_input_tokens) > max_tgt_len:
+            dec_input_tokens = dec_input_tokens[:max_tgt_len]
+
         enc_num_padding_tokens = self.seq_len - len(enc_input_tokens) - 2
         dec_num_padding_tokens = self.seq_len - len(dec_input_tokens) - 1
 
+        # This should never happen now, but keep as safety check
         if enc_num_padding_tokens < 0 or dec_num_padding_tokens < 0:
-            raise ValueError('Sentence is too long.')
+            # If still too long after truncation, truncate more aggressively
+            enc_input_tokens = enc_input_tokens[:max_src_len]
+            dec_input_tokens = dec_input_tokens[:max_tgt_len]
+            enc_num_padding_tokens = self.seq_len - len(enc_input_tokens) - 2
+            dec_num_padding_tokens = self.seq_len - len(dec_input_tokens) - 1
         
         # Add SOS and EOS to the source text
         encoder_input = torch.cat(

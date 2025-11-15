@@ -130,10 +130,46 @@ def get_ds(config, pin_memory: bool, seed: Optional[int] = None):
     tokenizer_src = build_tokenizer(config, ds_raw, config['lang_src'])
     tokenizer_tgt = build_tokenizer(config, ds_raw, config['lang_tgt'])
 
-    # split
-    train_ds_size = int(0.9 * len(ds_raw))
-    val_ds_size = len(ds_raw) - train_ds_size
-    train_ds_raw, val_ds_raw = random_split(ds_raw, [train_ds_size, val_ds_size])
+    # Filter out sentences that are too long before splitting
+    seq_len = config['seq_len']
+    max_src_len = seq_len - 2  # -2 for SOS and EOS
+    max_tgt_len = seq_len - 1  # -1 for SOS
+    
+    def filter_long_sentences(example):
+        src_text = example['translation'][config['lang_src']]
+        tgt_text = example['translation'][config['lang_tgt']]
+        src_tokens = tokenizer_src.encode(src_text).ids
+        tgt_tokens = tokenizer_tgt.encode(tgt_text).ids
+        return len(src_tokens) <= max_src_len and len(tgt_tokens) <= max_tgt_len
+    
+    print(f"Filtering sentences longer than {max_src_len} (src) / {max_tgt_len} (tgt) tokens...")
+    ds_filtered = ds_raw.filter(filter_long_sentences)
+    print(f"Filtered dataset: {len(ds_raw)} -> {len(ds_filtered)} examples ({100*len(ds_filtered)/len(ds_raw):.1f}% retained)")
+
+    # Calculate split to get exactly target_iterations with current batch_size
+    target_iterations = int(config.get('target_iterations', 28456))
+    batch_size = config['batch_size']
+    required_train_size = target_iterations * batch_size
+    
+    if required_train_size > len(ds_filtered):
+        # If we need more data than available, use all data and adjust batch_size
+        print(f"Warning: Need {required_train_size} examples for {target_iterations} iterations, but only have {len(ds_filtered)}")
+        print(f"Using all available data. Actual iterations will be: {len(ds_filtered) // batch_size}")
+        train_ds_size = len(ds_filtered)
+        val_ds_size = 0
+    else:
+        # Calculate split ratio to get exactly target_iterations
+        train_ds_size = required_train_size
+        val_ds_size = len(ds_filtered) - train_ds_size
+        if val_ds_size < 100:
+            # Ensure at least 100 validation examples
+            val_ds_size = min(100, len(ds_filtered) - train_ds_size)
+            train_ds_size = len(ds_filtered) - val_ds_size
+            print(f"Adjusted: train={train_ds_size}, val={val_ds_size} (actual iterations: {train_ds_size // batch_size})")
+        else:
+            print(f"Split calculated: train={train_ds_size} (iterations: {train_ds_size // batch_size}), val={val_ds_size}")
+    
+    train_ds_raw, val_ds_raw = random_split(ds_filtered, [train_ds_size, val_ds_size])
 
     train_ds = BilingualDataset(train_ds_raw, tokenizer_src, tokenizer_tgt,
                                 src_lang=config['lang_src'], tgt_lang=config['lang_tgt'],
@@ -142,16 +178,16 @@ def get_ds(config, pin_memory: bool, seed: Optional[int] = None):
                               src_lang=config['lang_src'], tgt_lang=config['lang_tgt'],
                               seq_len=config['seq_len'])
 
-    # quick max length print (optional)
+    # quick max length print (optional) - using filtered dataset
     max_len_src, max_len_tgt = 0, 0
-    for item in ds_raw:
+    for item in ds_filtered:
         src_ids = tokenizer_src.encode(item['translation'][config['lang_src']]).ids
         tgt_ids = tokenizer_tgt.encode(item['translation'][config['lang_tgt']]).ids
         max_len_src = max(max_len_src, len(src_ids))
         max_len_tgt = max(max_len_tgt, len(tgt_ids))
 
-    print(f"Max length of source sentence: {max_len_src}.")
-    print(f"Max length of target sentence: {max_len_tgt}.")
+    print(f"Max length of source sentence (after filtering): {max_len_src}.")
+    print(f"Max length of target sentence (after filtering): {max_len_tgt}.")
 
     generator = torch.Generator()
     if seed is not None:
@@ -226,11 +262,14 @@ def maybe_compile_model(model: nn.Module, config: Dict[str, any]) -> nn.Module:
     if not config.get('enable_compile', False):
         return model
     if not hasattr(torch, "compile"):
-        raise RuntimeError("torch.compile requested but this version of PyTorch does not support it.")
+        print("Warning: torch.compile requested but this version of PyTorch does not support it. Continuing without compilation.")
+        return model
 
     compile_kwargs = {
         "fullgraph": bool(config.get("compile_fullgraph", False)),
+        "mode": "reduce-overhead",  # Optimize for speed
     }
+    print("Compiling model with torch.compile for faster training...")
     return torch.compile(model, **compile_kwargs)
 
 
@@ -318,8 +357,8 @@ def train_model(config):
         running_loss = 0.0
         optimizer.zero_grad(set_to_none=True)
         
-        # Clear CUDA cache at the start of each epoch
-        if device.type == "cuda":
+        # Clear CUDA cache at the start of each epoch (only if needed)
+        if device.type == "cuda" and epoch == 0:
             torch.cuda.empty_cache()
         
         for step_idx, batch in enumerate(batch_iterator, start=1):
@@ -382,9 +421,9 @@ def train_model(config):
 
                 writer.add_scalar('train/loss', loss_value, global_step)
                 
-                # Periodically clear CUDA cache to prevent fragmentation
+                # Periodically clear CUDA cache to prevent fragmentation (less frequent for speed)
                 if device.type == "cuda":
-                    if step_idx % 50 == 0:
+                    if step_idx % 200 == 0:
                         torch.cuda.synchronize()
                         torch.cuda.empty_cache()
 
